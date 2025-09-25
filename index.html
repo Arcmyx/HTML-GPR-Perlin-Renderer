@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Perlin Underground — Full Res Smooth</title>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.6.0/lib/p5.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #0b1020;
+        color: #e6f0ff;
+        font-family: sans-serif;
+      }
+      #ui {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(0, 0, 0, 0.6);
+        padding: 8px;
+        border-radius: 6px;
+        z-index: 10;
+      }
+      button,
+      input {
+        margin: 2px;
+      }
+      #log {
+        max-height: 100px;
+        overflow-y: auto;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <button id="connectBtn">Connect</button>
+      <button id="disconnectBtn" disabled>Disconnect</button>
+      <button id="simulateBtn">Simulate</button>
+      <div>
+        <input id="manualInput" placeholder="Type UP/DOWN/LEFT/RIGHT" />
+        <button id="sendManual">Send</button>
+      </div>
+      <div id="status">Status: disconnected</div>
+      <div id="lastCmd">Last: —</div>
+      <div id="log"></div>
+    </div>
+
+    <script>
+      let port,
+        reader,
+        keepReading = false;
+      let offsetX = 0,
+        offsetY = 0,
+        panStep = 40;
+      let noiseScale = 0.006;
+
+      // --- Buffer for smooth full-res rendering ---
+      let terrainBuffer;
+      const bufferSize = 3000; // precompute a large chunk
+      let bufferOriginX = 0,
+        bufferOriginY = 0;
+
+      function log(msg) {
+        const el = document.createElement("div");
+        el.textContent = msg;
+        document.getElementById("log").prepend(el);
+      }
+
+      // Serial
+      async function connectSerial() {
+        try {
+          port = await navigator.serial.requestPort();
+          await port.open({ baudRate: 115200 });
+          document.getElementById("status").textContent = "Status: connected";
+          document.getElementById("connectBtn").disabled = true;
+          document.getElementById("disconnectBtn").disabled = false;
+          startReadingLoop();
+        } catch (e) {
+          log("Failed to connect: " + e);
+        }
+      }
+
+      async function disconnectSerial() {
+        keepReading = false;
+        if (reader) {
+          try {
+            await reader.cancel();
+          } catch (e) {}
+          reader = null;
+        }
+        if (port) {
+          try {
+            await port.close();
+          } catch (e) {}
+          port = null;
+        }
+        document.getElementById("status").textContent = "Status: disconnected";
+        document.getElementById("connectBtn").disabled = false;
+        document.getElementById("disconnectBtn").disabled = true;
+      }
+
+      async function startReadingLoop() {
+        keepReading = true;
+        const textDecoder = new TextDecoderStream();
+        port.readable.pipeTo(textDecoder.writable);
+        reader = textDecoder.readable.getReader();
+        let buffer = "";
+        while (keepReading) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value) {
+            buffer += value;
+            let lines = buffer.split(/\r?\n/);
+            buffer = lines.pop();
+            for (const line of lines) handleCommand(line.trim());
+          }
+        }
+      }
+
+      function handleCommand(cmd) {
+        if (!cmd) return;
+        cmd = cmd.toUpperCase();
+        log("RX: " + cmd);
+        document.getElementById("lastCmd").textContent = "Last: " + cmd;
+        if (cmd === "UP") offsetY -= panStep;
+        else if (cmd === "DOWN") offsetY += panStep;
+        else if (cmd === "LEFT") offsetX -= panStep;
+        else if (cmd === "RIGHT") offsetX += panStep;
+        updateBufferIfNeeded();
+      }
+
+      // UI
+      document.getElementById("connectBtn").onclick = connectSerial;
+      document.getElementById("disconnectBtn").onclick = disconnectSerial;
+      document.getElementById("simulateBtn").onclick = () => {
+        const cmds = ["UP", "DOWN", "LEFT", "RIGHT"];
+        handleCommand(cmds[Math.floor(Math.random() * 4)]);
+      };
+      document.getElementById("sendManual").onclick = () => {
+        let val = document.getElementById("manualInput").value.trim();
+        if (val) handleCommand(val);
+        document.getElementById("manualInput").value = "";
+      };
+
+      // --- p5 sketch ---
+      let sketch = (p) => {
+        p.setup = function () {
+          p.createCanvas(p.windowWidth, p.windowHeight);
+          p.noiseDetail(4, 0.5);
+          terrainBuffer = p.createGraphics(bufferSize, bufferSize);
+          renderTerrainBuffer();
+        };
+
+        p.draw = function () {
+          p.background(10, 15, 30);
+          // draw a slice of buffer
+          p.image(
+            terrainBuffer,
+            0,
+            0,
+            p.width,
+            p.height,
+            offsetX - bufferOriginX,
+            offsetY - bufferOriginY,
+            p.width,
+            p.height
+          );
+          p.fill(255);
+          p.textSize(12);
+          p.text("OffsetX:" + offsetX + " OffsetY:" + offsetY, 10, 15);
+        };
+
+        p.windowResized = function () {
+          p.resizeCanvas(p.windowWidth, p.windowHeight);
+        };
+      };
+      window._pInst = new p5(sketch);
+
+      // --- Buffer management ---
+      function updateBufferIfNeeded() {
+        // if viewport moves outside buffer, regenerate buffer
+        const margin = 200; // buffer safety margin
+        if (
+          offsetX < bufferOriginX + margin ||
+          offsetX + window.innerWidth > bufferOriginX + bufferSize - margin ||
+          offsetY < bufferOriginY + margin ||
+          offsetY + window.innerHeight > bufferOriginY + bufferSize - margin
+        ) {
+          bufferOriginX = offsetX - bufferSize / 2 + window.innerWidth / 2;
+          bufferOriginY = offsetY - bufferSize / 2 + window.innerHeight / 2;
+          renderTerrainBuffer();
+        }
+      }
+
+      function renderTerrainBuffer() {
+        const p = window._pInst;
+        terrainBuffer.loadPixels();
+        for (let y = 0; y < terrainBuffer.height; y++) {
+          for (let x = 0; x < terrainBuffer.width; x++) {
+            let n = p.noise(
+              (x + bufferOriginX) * noiseScale,
+              (y + bufferOriginY) * noiseScale
+            );
+            let col = n > 0.55 ? 50 : 200;
+            let idx = (x + y * terrainBuffer.width) * 4;
+            terrainBuffer.pixels[idx] = col;
+            terrainBuffer.pixels[idx + 1] = col;
+            terrainBuffer.pixels[idx + 2] = col;
+            terrainBuffer.pixels[idx + 3] = 255;
+          }
+        }
+        terrainBuffer.updatePixels();
+      }
+    </script>
+  </body>
+</html>
