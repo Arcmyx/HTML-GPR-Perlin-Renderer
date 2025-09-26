@@ -4,9 +4,14 @@
     <meta charset="utf-8" />
     <title>Perlin Underground — Full Res Smooth</title>
     <script src="https://cdn.jsdelivr.net/npm/p5@1.6.0/lib/p5.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.6.0/lib/addons/p5.dom.min.js"></script>
     <style>
+      html,
       body {
         margin: 0;
+        padding: 0;
+        width: 100vw;
+        height: 100vh;
         overflow: hidden;
         background: #0b1020;
         color: #e6f0ff;
@@ -46,28 +51,57 @@
       <div id="log"></div>
     </div>
 
+    <script id="vert" type="x-shader/x-vertex">
+      attribute vec3 aPosition;
+      varying vec2 vPos;
+      void main() {
+        vPos = aPosition.xy;
+        gl_Position = vec4(aPosition, 1.0);
+      }
+    </script>
+    <script id="frag" type="x-shader/x-fragment">
+      precision highp float;
+      varying vec2 vPos;
+      uniform float uOffsetX;
+      uniform float uOffsetY;
+      uniform float uNoiseScale;
+      // Simple Perlin noise implementation (or use p5's noise GLSL)
+      float hash(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+      }
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        float a = hash(i);
+        float b = hash(i + vec2(1.0, 0.0));
+        float c = hash(i + vec2(0.0, 1.0));
+        float d = hash(i + vec2(1.0, 1.0));
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+      }
+      void main() {
+        vec2 uv = gl_FragCoord.xy;
+        float n = noise((uv + vec2(uOffsetX, uOffsetY)) * uNoiseScale);
+        float col = n > 0.55 ? 0.2 : 0.8;
+        gl_FragColor = vec4(vec3(col), 1.0);
+      }
+    </script>
     <script>
       let port,
         reader,
         keepReading = false;
       let offsetX = 0,
         offsetY = 0,
+        targetOffsetX = 0,
+        targetOffsetY = 0,
         panStep = 40;
+      let zoom = 1;
       let noiseScale = 0.006;
-
-      // --- Buffer for smooth full-res rendering ---
-      let terrainBuffer;
-      const bufferSize = 3000; // precompute a large chunk
-      let bufferOriginX = 0,
-        bufferOriginY = 0;
-
       function log(msg) {
         const el = document.createElement("div");
         el.textContent = msg;
         document.getElementById("log").prepend(el);
       }
-
-      // Serial
       async function connectSerial() {
         try {
           port = await navigator.serial.requestPort();
@@ -80,7 +114,6 @@
           log("Failed to connect: " + e);
         }
       }
-
       async function disconnectSerial() {
         keepReading = false;
         if (reader) {
@@ -99,7 +132,6 @@
         document.getElementById("connectBtn").disabled = false;
         document.getElementById("disconnectBtn").disabled = true;
       }
-
       async function startReadingLoop() {
         keepReading = true;
         const textDecoder = new TextDecoderStream();
@@ -117,20 +149,19 @@
           }
         }
       }
-
       function handleCommand(cmd) {
         if (!cmd) return;
         cmd = cmd.toUpperCase();
         log("RX: " + cmd);
         document.getElementById("lastCmd").textContent = "Last: " + cmd;
-        if (cmd === "UP") offsetY -= panStep;
-        else if (cmd === "DOWN") offsetY += panStep;
-        else if (cmd === "LEFT") offsetX -= panStep;
-        else if (cmd === "RIGHT") offsetX += panStep;
-        updateBufferIfNeeded();
+        if (cmd === "UP") targetOffsetY += panStep;
+        else if (cmd === "DOWN") targetOffsetY -= panStep;
+        else if (cmd === "LEFT") targetOffsetX -= panStep;
+        else if (cmd === "RIGHT") targetOffsetX += panStep;
+        else if (cmd === "LIFT") zoom *= 1.1;
+        else if (cmd === "FALL") zoom /= 1.1;
+        zoom = Math.max(0.2, Math.min(zoom, 5));
       }
-
-      // UI
       document.getElementById("connectBtn").onclick = connectSerial;
       document.getElementById("disconnectBtn").onclick = disconnectSerial;
       document.getElementById("simulateBtn").onclick = () => {
@@ -142,76 +173,45 @@
         if (val) handleCommand(val);
         document.getElementById("manualInput").value = "";
       };
-
-      // --- p5 sketch ---
+      let terrainShader;
       let sketch = (p) => {
-        p.setup = function () {
-          p.createCanvas(p.windowWidth, p.windowHeight);
-          p.noiseDetail(4, 0.5);
-          terrainBuffer = p.createGraphics(bufferSize, bufferSize);
-          renderTerrainBuffer();
+        p.preload = function () {
+          // No shader creation here
         };
-
-        p.draw = function () {
-          p.background(10, 15, 30);
-          // draw a slice of buffer
-          p.image(
-            terrainBuffer,
-            0,
-            0,
-            p.width,
-            p.height,
-            offsetX - bufferOriginX,
-            offsetY - bufferOriginY,
-            p.width,
-            p.height
+        p.setup = function () {
+          p.createCanvas(p.windowWidth, p.windowHeight, p.WEBGL);
+          terrainShader = p.createShader(
+            document.getElementById("vert").textContent,
+            document.getElementById("frag").textContent
           );
+          p.noStroke();
+        };
+        p.draw = function () {
+          // Smoothly interpolate offsetX/Y toward targetOffsetX/Y
+          offsetX += (targetOffsetX - offsetX) * 0.15;
+          offsetY += (targetOffsetY - offsetY) * 0.15;
+          p.background(10, 15, 30);
+          terrainShader.setUniform("uOffsetX", offsetX);
+          terrainShader.setUniform("uOffsetY", offsetY);
+          terrainShader.setUniform("uNoiseScale", noiseScale * zoom);
+          p.shader(terrainShader);
+          p.rect(-p.width / 2, -p.height / 2, p.width, p.height);
+          p.resetShader();
           p.fill(255);
           p.textSize(12);
-          p.text("OffsetX:" + offsetX + " OffsetY:" + offsetY, 10, 15);
+          p.text(
+            `OffsetX: ${offsetX.toFixed(1)} OffsetY: ${offsetY.toFixed(
+              1
+            )} Zoom: ${zoom.toFixed(2)}`,
+            -p.width / 2 + 10,
+            -p.height / 2 + 15
+          );
         };
-
         p.windowResized = function () {
           p.resizeCanvas(p.windowWidth, p.windowHeight);
         };
       };
       window._pInst = new p5(sketch);
-
-      // --- Buffer management ---
-      function updateBufferIfNeeded() {
-        // if viewport moves outside buffer, regenerate buffer
-        const margin = 200; // buffer safety margin
-        if (
-          offsetX < bufferOriginX + margin ||
-          offsetX + window.innerWidth > bufferOriginX + bufferSize - margin ||
-          offsetY < bufferOriginY + margin ||
-          offsetY + window.innerHeight > bufferOriginY + bufferSize - margin
-        ) {
-          bufferOriginX = offsetX - bufferSize / 2 + window.innerWidth / 2;
-          bufferOriginY = offsetY - bufferSize / 2 + window.innerHeight / 2;
-          renderTerrainBuffer();
-        }
-      }
-
-      function renderTerrainBuffer() {
-        const p = window._pInst;
-        terrainBuffer.loadPixels();
-        for (let y = 0; y < terrainBuffer.height; y++) {
-          for (let x = 0; x < terrainBuffer.width; x++) {
-            let n = p.noise(
-              (x + bufferOriginX) * noiseScale,
-              (y + bufferOriginY) * noiseScale
-            );
-            let col = n > 0.55 ? 50 : 200;
-            let idx = (x + y * terrainBuffer.width) * 4;
-            terrainBuffer.pixels[idx] = col;
-            terrainBuffer.pixels[idx + 1] = col;
-            terrainBuffer.pixels[idx + 2] = col;
-            terrainBuffer.pixels[idx + 3] = 255;
-          }
-        }
-        terrainBuffer.updatePixels();
-      }
     </script>
   </body>
 </html>
